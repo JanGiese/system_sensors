@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-
 from os import error, path
 import sys
 import time
@@ -9,11 +8,14 @@ import pathlib
 import argparse
 import threading
 import paho.mqtt.client as mqtt
+from influxdb_client import InfluxDBClient, Point
+from influxdb_client.client.write_api import SYNCHRONOUS
 
 from sensors import *
 
 
 mqttClient = None
+influxdb_write_api = None
 global poll_interval
 devicename = None
 settings = {}
@@ -47,10 +49,16 @@ class Job(threading.Thread):
 
 def update_sensors():
     payload_str = f'{{'
+    datapoint = None
+    if influxdb_write_api:
+        datapoint = Point(devicename)
     for sensor, attr in sensors.items():
         # Skip sensors that have been disabled or are missing
         if sensor in external_drives or (settings['sensors'][sensor] is not None and settings['sensors'][sensor] == True):
-            payload_str += f'"{sensor}": "{attr["function"]()}",'
+            value = attr["function"]()
+            payload_str += f'"{sensor}": "{value}",'
+            if datapoint:
+                datapoint.field(sensor, value)
     payload_str = payload_str[:-1]
     payload_str += f'}}'
     mqttClient.publish(
@@ -59,6 +67,8 @@ def update_sensors():
         qos=1,
         retain=False,
     )
+    if influxdb_write_api:
+        influxdb_write_api.write(bucket=settings['influxdb_bucket'], record=datapoint)
 
 
 def send_config_message(mqttClient):
@@ -278,6 +288,12 @@ if __name__ == '__main__':
         write_message_to_console('Error while attempting to perform inital sensor update: ' + str(e))
         exit()
 
+    if 'influxdb_token' in settings:
+        influxdb_write_api = InfluxDBClient(url=settings['influxdb_url'],
+                                            token=settings['influxdb_token'],
+                                            org=settings['influxdb_org'])\
+            .write_api(write_options=SYNCHRONOUS)
+
     job = Job(interval=dt.timedelta(seconds=poll_interval), execute=update_sensors)
     job.start()
 
@@ -295,3 +311,4 @@ if __name__ == '__main__':
             sys.stdout.flush()
             job.stop()
             break
+
